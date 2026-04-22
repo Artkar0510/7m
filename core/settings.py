@@ -1,5 +1,10 @@
+from pathlib import Path
+
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+BASE_DIR = Path(__file__).parent.parent
 
 
 class AppSettings(BaseModel):
@@ -11,7 +16,7 @@ class AppSettings(BaseModel):
 
 class PostgresSettings(BaseModel):
     user: str = "postgres"
-    password: str = "postgres"
+    password: str
     host: str = "localhost"
     port: int = 5432
     db: str = "auth_service"
@@ -29,14 +34,14 @@ class RedisSettings(BaseModel):
 
 
 class JwtSettings(BaseModel):
-    secret_key: str = "change-me"
+    secret_key: str
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
 
 
 class InternalAuthSettings(BaseModel):
-    service_token: str = "internal-service-token"
+    service_token: str
     service_header: str = "X-Service-Token"
 
 
@@ -47,16 +52,22 @@ class PasswordHashSettings(BaseModel):
     dklen: int = Field(default=32, ge=32)
 
 
+class AuthSettings(BaseModel):
+    login_rate_limit: str = "10/minute"
+    register_rate_limit: str = "10/minute"
+
+
 class Settings(BaseSettings):
-    app: AppSettings = AppSettings()
-    postgres: PostgresSettings = PostgresSettings()
-    redis: RedisSettings = RedisSettings()
-    jwt: JwtSettings = JwtSettings()
-    internal_auth: InternalAuthSettings = InternalAuthSettings()
-    password_hash: PasswordHashSettings = PasswordHashSettings()
+    app: AppSettings = Field(default_factory=AppSettings)
+    postgres: PostgresSettings
+    redis: RedisSettings = Field(default_factory=RedisSettings)
+    jwt: JwtSettings
+    internal_auth: InternalAuthSettings
+    password_hash: PasswordHashSettings = Field(default_factory=PasswordHashSettings)
+    auth: AuthSettings = Field(default_factory=AuthSettings)
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=BASE_DIR /".env",
         env_file_encoding="utf-8",
         env_nested_delimiter="__",
     )

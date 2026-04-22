@@ -1,9 +1,12 @@
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import verify_internal_service
+from core.rate_limit import limiter
+from core.settings import settings
 from db.models import User
 from db.redis import blacklist_refresh_token, is_refresh_token_blacklisted
 from db.session import get_db
@@ -33,18 +36,22 @@ def normalize_email(email: str) -> str:
 
 
 @router.get("/health")
-def healthcheck() -> dict[str, str]:
+async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserResponse:
+@limiter.limit(settings.auth.register_rate_limit)
+async def register_user(
+    request: Request,
+    payload: UserCreate,
+    db: AsyncSession = Depends(get_db),
+) -> UserResponse:
     normalized_email = normalize_email(payload.email)
-    existing_user = db.query(User).filter(User.email == normalized_email).first()
+    existing_user = await db.scalar(select(User).where(User.email == normalized_email))
     if existing_user:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User already exists",
+            status_code=status.HTTP_202_ACCEPTED,
         )
 
     hashed_password, password_salt = hash_password(payload.password)
@@ -54,41 +61,45 @@ def register_user(payload: UserCreate, db: Session = Depends(get_db)) -> UserRes
         password_salt=password_salt,
     )
     db.add(user)
-    db.commit()
-    db.refresh(user)
-    cache_user_entity(user)
+    await db.commit()
+    await db.refresh(user)
+    await cache_user_entity(user)
     return UserResponse.model_validate(user)
 
 
 @router.post("/login", response_model=TokenPairResponse)
-def login_user(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenPairResponse:
+@limiter.limit(settings.auth.login_rate_limit)
+async def login_user(
+    request: Request,
+    payload: LoginRequest,
+    db: AsyncSession = Depends(get_db),
+) -> TokenPairResponse:
     normalized_email = normalize_email(payload.email)
-    cached_user = get_user_from_cache(normalized_email)
-    if cached_user is None:
-        user = db.query(User).filter(User.email == normalized_email).first()
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid credentials",
-            )
-        cached_user = cache_user_entity(user)
+    user = await db.scalar(select(User).where(User.email == normalized_email))
+    if user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid credentials",
+        )
 
     if not verify_password(
         payload.password,
-        str(cached_user["hashed_password"]),
-        str(cached_user["password_salt"]),
+        str(user.hashed_password),
+        str(user.password_salt),
     ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials",
         )
 
+    await cache_user_entity(user)
+
     access_token, access_expires_in = create_access_token(
-        user_id=int(cached_user["id"]),
+        user_id=int(user.id),
         email=normalized_email,
     )
     refresh_token, refresh_expires_in = create_refresh_token(
-        user_id=int(cached_user["id"]),
+        user_id=int(user.id),
         email=normalized_email,
     )
     return TokenPairResponse(
@@ -100,7 +111,7 @@ def login_user(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenPai
 
 
 @router.post("/logout")
-def logout_user(payload: LogoutRequest) -> dict[str, str]:
+async def logout_user(payload: LogoutRequest) -> dict[str, str]:
     try:
         refresh_payload = decode_refresh_token(payload.refresh_token)
     except TokenValidationError as exc:
@@ -110,7 +121,7 @@ def logout_user(payload: LogoutRequest) -> dict[str, str]:
         ) from exc
 
     token_jti = str(refresh_payload["jti"])
-    if is_refresh_token_blacklisted(token_jti):
+    if await is_refresh_token_blacklisted(token_jti):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token already revoked",
@@ -118,14 +129,15 @@ def logout_user(payload: LogoutRequest) -> dict[str, str]:
 
     expires_at = datetime.fromtimestamp(int(refresh_payload["exp"]), UTC)
     ttl_seconds = max(int((expires_at - datetime.now(UTC)).total_seconds()), 1)
-    blacklist_refresh_token(token_jti, ttl_seconds)
+    await blacklist_refresh_token(token_jti, ttl_seconds)
     return {"detail": "Successfully logged out"}
 
 
 @router.post("/introspect", response_model=AccessTokenIntrospectResponse)
-def introspect_access_token(
+async def introspect_access_token(
     payload: AccessTokenIntrospectRequest,
     _: str = Depends(verify_internal_service),
+    db: AsyncSession = Depends(get_db),
 ) -> AccessTokenIntrospectResponse:
     try:
         access_payload = decode_access_token(payload.access_token)
@@ -135,10 +147,35 @@ def introspect_access_token(
             detail=str(exc),
         ) from exc
 
+    user_id = int(access_payload["sub"])
+    email = str(access_payload["email"])
+    token_type = str(access_payload["type"])
+    expires_at = int(access_payload["exp"])
+
+    cached_user = await get_user_from_cache(email)
+    cache_matches_user = (
+        cached_user is not None
+        and int(cached_user["id"]) == user_id
+        and bool(cached_user["is_active"])
+    )
+
+    user = await db.scalar(select(User).where(User.id == user_id))
+    if user is None or not user.is_active:
+        return AccessTokenIntrospectResponse(
+            active=False,
+            user_id=user_id,
+            email=email,
+            token_type=token_type,
+            expires_at=expires_at,
+        )
+
+    if not cache_matches_user:
+        await cache_user_entity(user)
+
     return AccessTokenIntrospectResponse(
         active=True,
-        user_id=int(access_payload["sub"]),
-        email=str(access_payload["email"]),
-        token_type=str(access_payload["type"]),
-        expires_at=int(access_payload["exp"]),
+        user_id=user_id,
+        email=email,
+        token_type=token_type,
+        expires_at=expires_at,
     )

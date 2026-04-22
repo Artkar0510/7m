@@ -1,14 +1,32 @@
 import json
 from typing import Any
 
-from redis import Redis
+from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from core.settings import settings
 
+redis_client: Redis | None = None
 
-def get_redis_client() -> Redis:
-    return Redis.from_url(settings.redis.url, decode_responses=True)
+
+async def init_redis_client() -> Redis:
+    global redis_client
+    if redis_client is None:
+        redis_client = Redis.from_url(settings.redis.url, decode_responses=True)
+    return redis_client
+
+
+async def close_redis_client() -> None:
+    global redis_client
+    if redis_client is None:
+        return
+    await redis_client.aclose()
+    redis_client = None
+
+
+async def get_redis_client() -> Redis:
+    # Fallback for contexts where FastAPI lifespan is not triggered.
+    return await init_redis_client()
 
 
 def build_user_cache_key(email: str) -> str:
@@ -19,10 +37,10 @@ def build_refresh_blacklist_key(token_jti: str) -> str:
     return f"{settings.redis.refresh_blacklist_prefix}:{token_jti}"
 
 
-def get_cached_user(email: str) -> dict[str, Any] | None:
+async def get_cached_user(email: str) -> dict[str, Any] | None:
     try:
-        redis_client = get_redis_client()
-        cached_user = redis_client.get(build_user_cache_key(email))
+        redis_client = await get_redis_client()
+        cached_user = await redis_client.get(build_user_cache_key(email))
     except RedisError:
         return None
     if not cached_user:
@@ -30,10 +48,10 @@ def get_cached_user(email: str) -> dict[str, Any] | None:
     return json.loads(cached_user)
 
 
-def cache_user(user_data: dict[str, Any]) -> None:
+async def cache_user(user_data: dict[str, Any]) -> None:
     try:
-        redis_client = get_redis_client()
-        redis_client.setex(
+        redis_client = await get_redis_client()
+        await redis_client.setex(
             build_user_cache_key(user_data["email"]),
             settings.redis.user_cache_ttl_seconds,
             json.dumps(user_data),
@@ -42,17 +60,17 @@ def cache_user(user_data: dict[str, Any]) -> None:
         return None
 
 
-def blacklist_refresh_token(token_jti: str, ttl_seconds: int) -> None:
+async def blacklist_refresh_token(token_jti: str, ttl_seconds: int) -> None:
     try:
-        redis_client = get_redis_client()
-        redis_client.setex(build_refresh_blacklist_key(token_jti), ttl_seconds, "1")
+        redis_client = await get_redis_client()
+        await redis_client.setex(build_refresh_blacklist_key(token_jti), ttl_seconds, "1")
     except RedisError:
         return None
 
 
-def is_refresh_token_blacklisted(token_jti: str) -> bool:
+async def is_refresh_token_blacklisted(token_jti: str) -> bool:
     try:
-        redis_client = get_redis_client()
-        return redis_client.exists(build_refresh_blacklist_key(token_jti)) == 1
+        redis_client = await get_redis_client()
+        return await redis_client.exists(build_refresh_blacklist_key(token_jti)) == 1
     except RedisError:
         return False
