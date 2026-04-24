@@ -108,6 +108,10 @@ async def register_user(
         email=normalized_email,
         hashed_password=hashed_password,
         password_salt=password_salt,
+        country_code=payload.country_code,
+        region_code=payload.region_code,
+        birth_date=payload.birth_date,
+        last_device_type=payload.last_device_type,
     )
     db.add(user)
     await db.commit()
