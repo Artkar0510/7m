@@ -6,6 +6,7 @@ def build_user_cache_payload(user: User) -> dict[str, str | int | bool]:
     return {
         "id": user.id,
         "email": user.email,
+        "yandex_user_id": getattr(user, "yandex_user_id", None) or "",
         "is_active": user.is_active,
     }
 

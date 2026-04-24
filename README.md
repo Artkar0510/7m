@@ -34,6 +34,7 @@
 - Logout с отзывом `refresh token` через blacklist в `Redis`
 - Кеширование пользователя в `Redis` для уменьшения числа запросов к `PostgreSQL`
 - Интроспекция `access token` для других внутренних сервисов
+- Вход и автоматическая регистрация через `Yandex OAuth`
 
 ## Конфигурация
 
@@ -49,6 +50,8 @@
 - `JWT__...` настройки токенов
 - `INTERNAL_AUTH__...` служебная авторизация для внутренних сервисов
 - `PASSWORD_HASH__...` параметры хэширования пароля
+- `TRACING__...` настройки трассировки и `X-Request-Id`
+- `YANDEX_OAUTH__...` настройки входа через Яндекс ID
 
 ## Локальный запуск
 
@@ -122,6 +125,7 @@ docker compose up --build
 - `app` на `http://localhost:8000`
 - `postgres` на порту `5432`
 - `redis` на порту `6379`
+- `jaeger` UI на `http://localhost:16686`
 
 При запуске `app` контейнер автоматически выполняет:
 
@@ -173,6 +177,65 @@ curl http://localhost:8000/api/v1/auth/health
 {
   "status": "ok"
 }
+```
+
+В каждом ответе сервис возвращает заголовок `X-Request-Id`. Если клиент прислал свой `X-Request-Id`, сервис использует его же; если нет, генерирует новый.
+
+## Трассировка
+
+Сервис экспортирует трассировки в Jaeger через OTLP HTTP.
+
+Настройки по умолчанию:
+
+- `TRACING__ENABLED=true`
+- `TRACING__SERVICE_NAME=auth-service`
+- `TRACING__JAEGER_ENDPOINT=http://jaeger:4318/v1/traces`
+- `TRACING__REQUEST_ID_HEADER=X-Request-Id`
+
+После запуска `docker compose up --build` Jaeger UI доступен по адресу `http://localhost:16686`.
+
+## Вход через Яндекс ID
+
+Интеграция реализована по документации Yandex OAuth: сервис получает `code`, обменивает его на OAuth-токен через `https://oauth.yandex.ru/token`, затем запрашивает профиль пользователя через `https://login.yandex.ru/info`.
+
+Что делает Auth-сервис:
+
+- создаёт одноразовый `state` и хранит его в Redis с TTL
+- ищет пользователя по `yandex_user_id`
+- если не нашёл, ищет по email и привязывает Яндекс-аккаунт
+- если пользователя нет, создаёт нового пользователя без локального пароля
+- после этого выдаёт локальные `access` и `refresh` токены сервиса
+
+Для включения интеграции заполните переменные:
+
+- `YANDEX_OAUTH__ENABLED=true`
+- `YANDEX_OAUTH__CLIENT_ID=<client_id>`
+- `YANDEX_OAUTH__CLIENT_SECRET=<client_secret>`
+- `YANDEX_OAUTH__REDIRECT_URI=<redirect_uri>`
+
+Новые endpoint'ы:
+
+- `GET /api/v1/auth/oauth/yandex/authorize`
+- `POST /api/v1/auth/oauth/yandex/login`
+- `GET /api/v1/auth/oauth/yandex/callback?code=...`
+
+Пример получения URL авторизации:
+
+```bash
+curl http://localhost:8000/api/v1/auth/oauth/yandex/authorize
+```
+
+Ответ содержит `authorization_url` и `state`. Этот же `state` нужно вернуть в Auth-сервис после редиректа от Яндекса.
+
+Пример завершения входа:
+
+```bash
+curl -X POST http://localhost:8000/api/v1/auth/oauth/yandex/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "code": "yandex-authorization-code",
+    "state": "oauth-state-from-authorize-step"
+  }'
 ```
 
 ### Регистрация пользователя
