@@ -1,6 +1,7 @@
 from pathlib import Path
+from urllib.parse import quote_plus
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,11 +17,21 @@ class AppSettings(BaseModel):
 
 class PostgresSettings(BaseModel):
     user: str = "postgres"
-    password: str
+    password: str = Field(default="postgres", exclude=True)
     host: str = "localhost"
     port: int = 5432
     db: str = "auth_service"
-    url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/auth_service"
+    pool_size: int = 20
+    max_overflow: int = 10
+    
+    @computed_field
+    @property
+    def url(self) -> str:
+        encoded_password = quote_plus(self.password)
+        return f"postgresql+asyncpg://{self.user}:{encoded_password}@{self.host}:{self.port}/{self.db}"
+    
+    class Config:
+        env_prefix = "POSTGRES_"
 
 
 class RedisSettings(BaseModel):
