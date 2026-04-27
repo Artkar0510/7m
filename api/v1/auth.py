@@ -1,3 +1,4 @@
+import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -40,6 +41,8 @@ from utils.yandex_oauth import (
     validate_yandex_oauth_state,
 )
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 
@@ -48,7 +51,7 @@ def normalize_email(email: str) -> str:
 
 
 async def _get_or_create_user_from_yandex(db: AsyncSession, code: str) -> User:  
-    access_token = await exchange_code_for_token(code)  # Убираем параметр
+    access_token = await exchange_code_for_token(code)
     yandex_user = await fetch_yandex_user_info(access_token)
     normalized_email = normalize_email(str(yandex_user.email))
     user = await db.scalar(
@@ -90,11 +93,17 @@ async def register_user(
     payload: UserCreate,
     db: AsyncSession = Depends(get_db),
 ) -> UserResponse:
+    import asyncio
+    import random
+    
     normalized_email = normalize_email(payload.email)
     existing_user = await db.scalar(select(User).where(User.email == normalized_email))
+    
     if existing_user:
+        await asyncio.sleep(random.uniform(0.05, 0.15))
         raise HTTPException(
-            status_code=status.HTTP_202_ACCEPTED,
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User already exists",
         )
 
     hashed_password, password_salt = hash_password(payload.password)
@@ -174,11 +183,21 @@ async def logout_user(payload: LogoutRequest) -> dict[str, str]:
         ) from exc
 
     token_jti = str(refresh_payload["jti"])
-    if await is_refresh_token_blacklisted(token_jti):
+    
+    try:
+        if await is_refresh_token_blacklisted(token_jti):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Refresh token already revoked",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Unexpected error checking blacklist: {exc}")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Refresh token already revoked",
-        )
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable",
+        ) from exc
 
     expires_at = datetime.fromtimestamp(int(refresh_payload["exp"]), UTC)
     ttl_seconds = max(int((expires_at - datetime.now(UTC)).total_seconds()), 1)
@@ -206,11 +225,15 @@ async def introspect_access_token(
     expires_at = int(access_payload["exp"])
 
     cached_user = await get_user_from_cache(email)
-    cache_matches_user = (
-        cached_user is not None
-        and int(cached_user["id"]) == user_id
-        and bool(cached_user["is_active"])
-    )
+    
+    if cached_user and int(cached_user["id"]) == user_id and cached_user.get("is_active", False):
+        return AccessTokenIntrospectResponse(
+            active=True,
+            user_id=user_id,
+            email=email,
+            token_type=token_type,
+            expires_at=expires_at,
+        )
 
     user = await db.scalar(select(User).where(User.id == user_id))
     if user is None or not user.is_active:
@@ -222,8 +245,7 @@ async def introspect_access_token(
             expires_at=expires_at,
         )
 
-    if not cache_matches_user:
-        await cache_user_entity(user)
+    await cache_user_entity(user)
 
     return AccessTokenIntrospectResponse(
         active=True,
@@ -238,9 +260,7 @@ async def introspect_access_token(
 async def get_yandex_authorization_url() -> YandexAuthorizeResponse:
     state = await create_yandex_oauth_state()
     return YandexAuthorizeResponse(
-        authorization_url=build_yandex_authorization_url(
-            state=state
-        ),
+        authorization_url=build_yandex_authorization_url(state=state),
         state=state,
     )
 

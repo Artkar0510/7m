@@ -1,11 +1,15 @@
 import asyncio
 import json
+import logging
 from typing import Any
 
+from fastapi import HTTPException, status
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from core.settings import settings
+
+logger = logging.getLogger(__name__)
 
 redis_client: Redis | None = None
 redis_client_loop_id: int | None = None
@@ -39,7 +43,6 @@ async def close_redis_client() -> None:
 
 
 async def get_redis_client() -> Redis:
-    # Fallback for contexts where FastAPI lifespan is not triggered.
     return await init_redis_client()
 
 
@@ -59,7 +62,8 @@ async def get_cached_user(email: str) -> dict[str, Any] | None:
     try:
         redis_client = await get_redis_client()
         cached_user = await redis_client.get(build_user_cache_key(email))
-    except RedisError:
+    except RedisError as e:
+        logger.error(f"Redis error in get_cached_user: {e}")
         return None
     if not cached_user:
         return None
@@ -74,24 +78,32 @@ async def cache_user(user_data: dict[str, Any]) -> None:
             settings.redis.user_cache_ttl_seconds,
             json.dumps(user_data),
         )
-    except RedisError:
-        return None
+    except RedisError as e:
+        logger.error(f"Redis error in cache_user: {e}")
 
 
 async def blacklist_refresh_token(token_jti: str, ttl_seconds: int) -> None:
     try:
         redis_client = await get_redis_client()
         await redis_client.setex(build_refresh_blacklist_key(token_jti), ttl_seconds, "1")
-    except RedisError:
-        return None
+    except RedisError as e:
+        logger.error(f"Failed to blacklist token {token_jti}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable. Please try again."
+        )
 
 
 async def is_refresh_token_blacklisted(token_jti: str) -> bool:
     try:
         redis_client = await get_redis_client()
         return await redis_client.exists(build_refresh_blacklist_key(token_jti)) == 1
-    except RedisError:
-        return False
+    except RedisError as e:
+        logger.error(f"Redis error in is_refresh_token_blacklisted: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable. Please try again."
+        )
 
 
 async def store_yandex_oauth_state(state: str) -> bool:
@@ -103,8 +115,12 @@ async def store_yandex_oauth_state(state: str) -> bool:
             "1",
         )
         return True
-    except RedisError:
-        return False
+    except RedisError as e:
+        logger.error(f"Failed to store Yandex OAuth state: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable. Please try again."
+        )
 
 
 async def consume_yandex_oauth_state(state: str) -> bool:
@@ -112,5 +128,9 @@ async def consume_yandex_oauth_state(state: str) -> bool:
         redis_client = await get_redis_client()
         deleted_keys = await redis_client.delete(build_yandex_oauth_state_key(state))
         return deleted_keys == 1
-    except RedisError:
-        return False
+    except RedisError as e:
+        logger.error(f"Failed to consume Yandex OAuth state: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Service temporarily unavailable. Please try again."
+        )
