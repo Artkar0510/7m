@@ -101,10 +101,12 @@ async def register_user(
     
     if existing_user:
         await asyncio.sleep(random.uniform(0.05, 0.15))
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="User already exists",
+        fake_user = User(
+            email=normalized_email,
+            hashed_password="",
+            password_salt="",
         )
+        return UserResponse.model_validate(fake_user)
 
     hashed_password, password_salt = hash_password(payload.password)
     user = User(
@@ -121,7 +123,6 @@ async def register_user(
     await db.refresh(user)
     await cache_user_entity(user)
     return UserResponse.model_validate(user)
-
 
 @router.post("/login", response_model=TokenPairResponse)
 @limiter.limit(settings.auth.login_rate_limit)
