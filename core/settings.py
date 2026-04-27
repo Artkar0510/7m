@@ -67,7 +67,6 @@ class TracingSettings(BaseModel):
 class YandexOAuthSettings(BaseModel):
     client_id: str = ""
     client_secret: str = ""
-    redirect_uri: str = "http://localhost:8000/api/v1/auth/oauth/yandex/callback"
     authorize_url: str = "https://oauth.yandex.ru/authorize"
     token_url: str = "https://oauth.yandex.ru/token"
     user_info_url: str = "https://login.yandex.ru/info"

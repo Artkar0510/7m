@@ -218,7 +218,6 @@ curl http://localhost:8000/api/v1/auth/health
 - `YANDEX_OAUTH__ENABLED=true`
 - `YANDEX_OAUTH__CLIENT_ID=<client_id>`
 - `YANDEX_OAUTH__CLIENT_SECRET=<client_secret>`
-- `YANDEX_OAUTH__REDIRECT_URI=<redirect_uri>`
 
 Новые endpoint'ы:
 

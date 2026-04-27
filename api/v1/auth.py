@@ -47,15 +47,10 @@ def normalize_email(email: str) -> str:
     return email.strip().lower()
 
 
-async def _get_or_create_user_from_yandex(
-    db: AsyncSession,
-    code: str,
-    redirect_uri: str | None = None,
-) -> User:
-    access_token = await exchange_code_for_token(code, redirect_uri=redirect_uri)
+async def _get_or_create_user_from_yandex(db: AsyncSession, code: str) -> User:  
+    access_token = await exchange_code_for_token(code)  # Убираем параметр
     yandex_user = await fetch_yandex_user_info(access_token)
     normalized_email = normalize_email(str(yandex_user.email))
-
     user = await db.scalar(
         select(User).where(
             or_(
@@ -64,7 +59,6 @@ async def _get_or_create_user_from_yandex(
             )
         )
     )
-
     if user is None:
         user = User(
             email=normalized_email,
@@ -241,10 +235,12 @@ async def introspect_access_token(
 
 
 @router.get("/oauth/yandex/authorize", response_model=YandexAuthorizeResponse)
-async def get_yandex_authorization_url(redirect_uri: str | None = None) -> YandexAuthorizeResponse:
+async def get_yandex_authorization_url() -> YandexAuthorizeResponse:
     state = await create_yandex_oauth_state()
     return YandexAuthorizeResponse(
-        authorization_url=build_yandex_authorization_url(state=state, redirect_uri=redirect_uri),
+        authorization_url=build_yandex_authorization_url(
+            state=state
+        ),
         state=state,
     )
 
@@ -259,8 +255,7 @@ async def login_with_yandex(
     try:
         user = await _get_or_create_user_from_yandex(
             db,
-            code=payload.code,
-            redirect_uri=payload.redirect_uri,
+            code=payload.code
         )
     except YandexOAuthError as exc:
         raise HTTPException(

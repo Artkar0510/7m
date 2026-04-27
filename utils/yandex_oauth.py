@@ -56,14 +56,13 @@ def ensure_yandex_oauth_configured(require_secret: bool = False) -> None:
         )
 
 
-def build_yandex_authorization_url(state: str, redirect_uri: str | None = None) -> str:
+def build_yandex_authorization_url(state: str) -> str:
     ensure_yandex_oauth_enabled()
     ensure_yandex_oauth_configured()
     query = urlencode(
         {
             "response_type": "code",
             "client_id": settings.yandex_oauth.client_id,
-            "redirect_uri": redirect_uri or settings.yandex_oauth.redirect_uri,
             "scope": settings.yandex_oauth.scope,
             "state": state,
             "force_confirm": "no",
@@ -94,17 +93,15 @@ async def validate_yandex_oauth_state(state: str) -> None:
         )
 
 
-async def exchange_code_for_token(code: str, redirect_uri: str | None = None) -> str:
+async def exchange_code_for_token(code: str) -> str:
     ensure_yandex_oauth_enabled()
-    ensure_yandex_oauth_configured(require_secret=True)
+    ensure_yandex_oauth_configured(require_secret=True) 
     payload = {
         "grant_type": "authorization_code",
         "code": code,
         "client_id": settings.yandex_oauth.client_id,
-        "client_secret": settings.yandex_oauth.client_secret,
-        "redirect_uri": redirect_uri or settings.yandex_oauth.redirect_uri,
+        "client_secret": settings.yandex_oauth.client_secret
     }
-
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(settings.yandex_oauth.token_url, data=payload)
@@ -113,7 +110,6 @@ async def exchange_code_for_token(code: str, redirect_uri: str | None = None) ->
         raise YandexOAuthError("Failed to exchange Yandex OAuth code") from exc
     except httpx.HTTPError as exc:
         raise YandexOAuthError("Failed to reach Yandex OAuth") from exc
-
     access_token = response.json().get("access_token")
     if not isinstance(access_token, str) or not access_token:
         raise YandexOAuthError("Yandex OAuth response does not contain access token")
