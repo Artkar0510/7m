@@ -18,9 +18,6 @@ from schemas.auth import (
     LoginRequest,
     LogoutRequest,
     TokenPairResponse,
-    YandexAuthorizeResponse,
-    YandexOAuthExchangeRequest,
-    YandexOAuthLoginResponse,
 )
 from schemas.user import UserCreate, UserResponse
 from utils.cache import cache_user_entity, get_user_from_cache
@@ -32,14 +29,7 @@ from utils.jwt import (
     decode_refresh_token,
 )
 from utils.security import hash_password, verify_password
-from utils.yandex_oauth import (
-    YandexOAuthError,
-    build_yandex_authorization_url,
-    create_yandex_oauth_state,
-    exchange_code_for_token,
-    fetch_yandex_user_info,
-    validate_yandex_oauth_state,
-)
+from utils.oauth import get_provider, get_all_providers
 
 logger = logging.getLogger(__name__)
 
@@ -48,37 +38,6 @@ router = APIRouter()
 
 def normalize_email(email: str) -> str:
     return email.strip().lower()
-
-
-async def _get_or_create_user_from_yandex(db: AsyncSession, code: str) -> User:  
-    access_token = await exchange_code_for_token(code)
-    yandex_user = await fetch_yandex_user_info(access_token)
-    normalized_email = normalize_email(str(yandex_user.email))
-    user = await db.scalar(
-        select(User).where(
-            or_(
-                User.yandex_user_id == yandex_user.user_id,
-                User.email == normalized_email,
-            )
-        )
-    )
-    if user is None:
-        user = User(
-            email=normalized_email,
-            hashed_password=None,
-            password_salt=None,
-            yandex_user_id=yandex_user.user_id,
-            is_active=True,
-        )
-        db.add(user)
-    else:
-        if user.yandex_user_id is None:
-            user.yandex_user_id = yandex_user.user_id
-
-    await db.commit()
-    await db.refresh(user)
-    await cache_user_entity(user)
-    return user
 
 
 @router.get("/health")
@@ -124,6 +83,7 @@ async def register_user(
     await cache_user_entity(user)
     return UserResponse.model_validate(user)
 
+
 @router.post("/login", response_model=TokenPairResponse)
 @limiter.limit(settings.auth.login_rate_limit)
 async def login_user(
@@ -142,7 +102,7 @@ async def login_user(
     if user.hashed_password is None or user.password_salt is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Use Yandex login for this account",
+            detail="Use OAuth login for this account",
         )
 
     if not verify_password(
@@ -257,33 +217,32 @@ async def introspect_access_token(
     )
 
 
-@router.get("/oauth/yandex/authorize", response_model=YandexAuthorizeResponse)
-async def get_yandex_authorization_url() -> YandexAuthorizeResponse:
-    state = await create_yandex_oauth_state()
-    return YandexAuthorizeResponse(
-        authorization_url=build_yandex_authorization_url(state=state),
-        state=state,
-    )
+@router.get("/oauth/{provider_name}/authorize")
+async def oauth_authorize(provider_name: str) -> dict:
+    provider = get_provider(provider_name)
+    state = await provider.create_state()
+    authorization_url = await provider.build_authorization_url(state)
+    return {"authorization_url": authorization_url, "state": state}
 
 
-@router.post("/oauth/yandex/login", response_model=YandexOAuthLoginResponse)
-async def login_with_yandex(
-    payload: YandexOAuthExchangeRequest,
+@router.post("/oauth/{provider_name}/login")
+async def oauth_login(
+    provider_name: str,
+    code: str,
+    state: str,
     db: AsyncSession = Depends(get_db),
-) -> YandexOAuthLoginResponse:
-    await validate_yandex_oauth_state(payload.state)
-
+) -> TokenPairResponse:
+    provider = get_provider(provider_name)
+    await provider.validate_state(state)
+    
     try:
-        user = await _get_or_create_user_from_yandex(
-            db,
-            code=payload.code
-        )
-    except YandexOAuthError as exc:
+        user = await provider.get_or_create_user(db, code)
+    except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=str(exc),
+            detail=f"{provider_name} OAuth failed: {str(exc)}",
         ) from exc
-
+    
     access_token, access_expires_in = create_access_token(
         user_id=int(user.id),
         email=str(user.email),
@@ -292,9 +251,8 @@ async def login_with_yandex(
         user_id=int(user.id),
         email=str(user.email),
     )
-
-    return YandexOAuthLoginResponse(
-        user=AuthenticatedUserResponse.model_validate(user),
+    
+    return TokenPairResponse(
         access_token=access_token,
         refresh_token=refresh_token,
         access_token_expires_in=access_expires_in,
@@ -302,13 +260,17 @@ async def login_with_yandex(
     )
 
 
-@router.get("/oauth/yandex/callback", response_model=YandexOAuthLoginResponse)
-async def yandex_callback(
+@router.get("/oauth/{provider_name}/callback")
+async def oauth_callback(
+    provider_name: str,
     code: str,
     state: str,
     db: AsyncSession = Depends(get_db),
-) -> YandexOAuthLoginResponse:
-    return await login_with_yandex(
-        YandexOAuthExchangeRequest(code=code, state=state),
-        db=db,
-    )
+) -> TokenPairResponse:
+    return await oauth_login(provider_name, code, state, db)
+
+
+@router.get("/oauth/providers")
+async def list_oauth_providers() -> dict:
+    providers = get_all_providers()
+    return {"providers": list(providers.keys())}
