@@ -2,7 +2,7 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.deps import verify_internal_service
@@ -14,7 +14,6 @@ from db.session import get_db
 from schemas.auth import (
     AccessTokenIntrospectRequest,
     AccessTokenIntrospectResponse,
-    AuthenticatedUserResponse,
     LoginRequest,
     LogoutRequest,
     TokenPairResponse,
@@ -38,6 +37,40 @@ router = APIRouter()
 
 def normalize_email(email: str) -> str:
     return email.strip().lower()
+
+
+async def _oauth_login_logic(
+    provider_name: str,
+    code: str,
+    state: str,
+    db: AsyncSession,
+) -> TokenPairResponse:
+    provider = get_provider(provider_name)
+    await provider.validate_state(state)
+    
+    try:
+        user = await provider.get_or_create_user(db, code)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"{provider_name} OAuth failed: {str(exc)}",
+        ) from exc
+    
+    access_token, access_expires_in = create_access_token(
+        user_id=int(user.id),
+        email=str(user.email),
+    )
+    refresh_token, refresh_expires_in = create_refresh_token(
+        user_id=int(user.id),
+        email=str(user.email),
+    )
+    
+    return TokenPairResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        access_token_expires_in=access_expires_in,
+        refresh_token_expires_in=refresh_expires_in,
+    )
 
 
 @router.get("/health")
@@ -232,32 +265,7 @@ async def oauth_login(
     state: str,
     db: AsyncSession = Depends(get_db),
 ) -> TokenPairResponse:
-    provider = get_provider(provider_name)
-    await provider.validate_state(state)
-    
-    try:
-        user = await provider.get_or_create_user(db, code)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"{provider_name} OAuth failed: {str(exc)}",
-        ) from exc
-    
-    access_token, access_expires_in = create_access_token(
-        user_id=int(user.id),
-        email=str(user.email),
-    )
-    refresh_token, refresh_expires_in = create_refresh_token(
-        user_id=int(user.id),
-        email=str(user.email),
-    )
-    
-    return TokenPairResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        access_token_expires_in=access_expires_in,
-        refresh_token_expires_in=refresh_expires_in,
-    )
+    return await _oauth_login_logic(provider_name, code, state, db)
 
 
 @router.get("/oauth/{provider_name}/callback")
@@ -267,7 +275,7 @@ async def oauth_callback(
     state: str,
     db: AsyncSession = Depends(get_db),
 ) -> TokenPairResponse:
-    return await oauth_login(provider_name, code, state, db)
+    return await _oauth_login_logic(provider_name, code, state, db)
 
 
 @router.get("/oauth/providers")
